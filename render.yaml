@@ -1,0 +1,23 @@
+# Render.com blueprint — the recommended deploy (see README).
+# In Render: New > Blueprint, point it at the repo containing this folder.
+# Then set the PIN env vars in the Render dashboard (they are generated
+# below as random values — copy them from the dashboard and give each
+# driver only their own truck's PIN).
+services:
+  - type: web
+    name: canadian-lakes-plow-tracker
+    env: node
+    plan: free
+    buildCommand: "echo 'no build step'"
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUCK1_PIN
+        generateValue: true
+      - key: TRUCK2_PIN
+        generateValue: true
+      - key: TRUCK3_PIN
+        generateValue: true
+      - key: ADMIN_PIN
+        generateValue: true
