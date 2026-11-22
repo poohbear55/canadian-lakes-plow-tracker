@@ -1,0 +1,134 @@
+// End-to-end tests for the standalone public tracker.
+// Run: npm test   (starts the real server on a random port, DATA_DIR in a
+// temp folder, default PINs; no network beyond localhost is needed except
+// the Leaflet CDN, which the tests do not fetch.)
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'plow-test-'));
+process.env.TRUCK1_PIN = '1101';
+process.env.TRUCK2_PIN = '2202';
+process.env.TRUCK3_PIN = '3303';
+process.env.ADMIN_PIN = '9999';
+
+const { server, roadEnds } = require('../server.js');
+
+async function main() {
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  const j = async (url, opts) => {
+    const res = await fetch(base + url, opts);
+    const body = await res.text();
+    let json = null;
+    try { json = JSON.parse(body); } catch { /* html */ }
+    return { status: res.status, json, body };
+  };
+  const post = (url, obj) => j(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+
+  // 1. Routes load: 165 roads, 73/56/36, miles match v11.
+  let r = await j('/api/routes');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.routes.length, 165, '165 roads');
+  for (const [t, n, miles] of [[1, 73, 22.51], [2, 56, 19.11], [3, 36, 5.75]]) {
+    const tr = r.json.trucks.find((x) => x.truck === t);
+    assert.equal(tr.roads, n, `truck ${t} roads`);
+    assert.equal(tr.miles, miles, `truck ${t} miles`);
+  }
+  assert.equal(r.json.landmarks.length, 2, 'sand pile + HOME markers');
+  console.log('ok: routes 165 (73/56/36), miles 22.51/19.11/5.75, 2 landmarks');
+
+  // 2. Frontend serves and contains the driver-lock logic.
+  r = await j('/');
+  assert.equal(r.status, 200);
+  assert.ok(r.body.includes('driver') && r.body.includes('app.js'), 'index serves with driver mode');
+  console.log('ok: frontend serves, driver-lock code present');
+
+  // 3. PINs enforced: no pin / wrong pin rejected.
+  assert.equal((await j('/api/state')).status, 401);
+  assert.equal((await post('/api/position', { truck: 1, pin: '0000', lat: 43.59, lon: -85.31 })).status, 401);
+  console.log('ok: PINs enforced (401 without/wrong PIN)');
+
+  // 4. End-to-end rule on Montreal Lane (Truck 1, order 1, id 1001):
+  //    one end -> STARTED, not done; other end -> DONE.
+  const routes = (await j('/api/routes')).json.routes;
+  const road = routes.find((x) => x.id === 1001);
+  const ends = roadEnds(road);
+  r = await post('/api/position', { truck: 1, pin: '1101', lat: ends.endA[0], lon: ends.endA[1], driverName: 'Test' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.newlyCompleted, [], 'one end must not complete');
+  assert.equal(r.json.inProgress.length, 1, 'one end = in progress');
+  let st = await j('/api/state?pin=9999');
+  assert.equal(st.json.doneCount, 0, 'still 0 done after one end');
+  r = await post('/api/position', { truck: 1, pin: '1101', lat: ends.endB[0], lon: ends.endB[1], driverName: 'Test' });
+  assert.equal(r.json.newlyCompleted.length, 1, 'both ends = completed');
+  assert.equal(r.json.newlyCompleted[0].id, 1001);
+  st = await j('/api/state?pin=9999');
+  assert.equal(st.json.doneCount, 1);
+  assert.ok(st.json.doneRoadIds.includes(1001));
+  console.log('ok: end-to-end rule — Montreal Lane amber at one end, green at both');
+
+  // 5. Truck isolation: Truck 2 driving at Montreal Lane's ends must NOT
+  //    complete Truck 1's road (and must not need Truck 1's PIN).
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  await post('/api/position', { truck: 2, pin: '2202', lat: ends.endA[0], lon: ends.endA[1] });
+  await post('/api/position', { truck: 2, pin: '2202', lat: ends.endB[0], lon: ends.endB[1] });
+  st = await j('/api/state?pin=9999');
+  assert.ok(!st.json.doneRoadIds.includes(1001), 'Truck 2 must not complete Truck 1 road');
+  console.log('ok: truck isolation — Orange at Red road ends does not complete it');
+
+  // 6. Truck PIN sees only its own truck; admin sees all.
+  st = await j('/api/state?pin=2202');
+  assert.equal(st.json.totalRoads, 56, 'Orange PIN sees 56 roads');
+  assert.ok(st.json.positions.every((p) => p.truck === 2), 'Orange PIN sees only Orange positions');
+  st = await j('/api/state?pin=9999');
+  assert.equal(st.json.totalRoads, 165, 'admin sees 165 roads');
+  console.log('ok: scoped state — truck PIN sees own truck only, admin sees all');
+
+  // 7. SSE live stream: a position posted after connecting arrives without reload.
+  const ctrl = new AbortController();
+  const stream = await fetch(base + '/api/events?pin=9999', { signal: ctrl.signal });
+  assert.equal(stream.status, 200);
+  const reader = stream.body.getReader();
+  const chunks = [];
+  const readPump = (async () => {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value).toString());
+      if (chunks.join('').includes('TestSSE')) break;
+    }
+  })();
+  await post('/api/position', { truck: 3, pin: '3303', lat: 43.59, lon: -85.30, driverName: 'TestSSE' });
+  await Promise.race([readPump, new Promise((_, rej) => setTimeout(() => rej(new Error('SSE timeout')), 5000))]);
+  ctrl.abort();
+  assert.ok(chunks.join('').includes('TestSSE'), 'SSE delivered the new position');
+  console.log('ok: SSE live stream pushes new positions without reload');
+
+  // 8. Manual tap-to-mark override, then undo.
+  r = await post('/api/complete', { roadId: 3001, pin: '3303', done: true, driverName: 'Test' });
+  assert.equal(r.status, 200);
+  st = await j('/api/state?pin=9999');
+  assert.ok(st.json.doneRoadIds.includes(3001), 'manual complete works');
+  r = await post('/api/complete', { roadId: 3001, pin: '3303', done: false });
+  st = await j('/api/state?pin=9999');
+  assert.ok(!st.json.doneRoadIds.includes(3001), 'manual undo works');
+  console.log('ok: manual mark done / undo');
+
+  // 9. Admin reset clears the run.
+  await post('/api/position', { truck: 1, pin: '1101', lat: ends.endA[0], lon: ends.endA[1] });
+  await post('/api/position', { truck: 1, pin: '1101', lat: ends.endB[0], lon: ends.endB[1] });
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  st = await j('/api/state?pin=9999');
+  assert.equal(st.json.doneCount, 0, 'reset clears done roads');
+  console.log('ok: admin reset starts a fresh run');
+
+  server.close();
+  console.log('\nALL TESTS PASSED');
+}
+main().catch((e) => { console.error('TEST FAILED:', e); server.close(); process.exit(1); });
