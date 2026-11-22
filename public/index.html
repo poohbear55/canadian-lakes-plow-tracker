@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Canadian Lakes Plow Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div>
+    <h1>Canadian Lakes Plow Tracker</h1>
+    <p id="subtitle">South of Buchanan Rd &middot; 165 roads &middot; 47.4 mi</p>
+  </div>
+  <div id="runInfo"><span id="runLabel">—</span> &middot; <b id="doneCount">0</b>/<span id="totalCount">165</span> done</div>
+</header>
+
+<div id="pinGate" class="overlay hidden">
+  <div class="card">
+    <h2 id="pinTitle">Enter PIN</h2>
+    <p id="pinText"></p>
+    <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN" maxlength="12">
+    <p id="pinError" class="error"></p>
+    <button id="pinSubmit">Unlock</button>
+    <p class="hint">Ask Grayson for your truck PIN. The admin PIN unlocks the all-trucks view.</p>
+  </div>
+</div>
+
+<main>
+  <section id="mapWrap">
+    <div id="map"></div>
+    <div id="mapLegend">
+      <span><i class="sw" style="background:#d62728"></i>Red Single Axle</span>
+      <span><i class="sw" style="background:#e67e22"></i>Orange Single Axle</span>
+      <span><i class="sw" style="background:#7d3c98"></i>Backhoe</span>
+      <span><i class="sw" style="background:#2ca02c"></i>Done (green)</span>
+      <span><i class="sw" style="background:#f5b301"></i>Started (amber)</span>
+    </div>
+  </section>
+
+  <section id="side">
+    <div id="driverNote" class="banner hidden">Drive it your way — do the roads in any order you like. Just finish every highlighted road on your truck.</div>
+    <div id="adminNote" class="banner hidden">Admin view — all three trucks live. Drivers choose their own order, so out-of-order finishes are expected.</div>
+
+    <div id="truckCards"></div>
+
+    <div id="controls">
+      <button id="trackBtn" class="hidden">▶ Start GPS tracking</button>
+      <button id="stopBtn" class="hidden">■ Stop tracking</button>
+      <span id="gpsStatus"></span>
+      <button id="resetBtn" class="hidden danger">Start a new run (clears done roads)</button>
+    </div>
+
+    <h2 id="listTitle">Roads</h2>
+    <p id="suggested"></p>
+    <ul id="roadList"></ul>
+
+    <h2>Recent activity</h2>
+    <ul id="feed"></ul>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
