@@ -35,6 +35,7 @@
   let watchId = null;
   let lastSent = 0;
   let lastPos = null;
+  let followMe = false; // driver follow mode: map pans to keep the truck centred
 
   const $ = (id) => document.getElementById(id);
   const fmtAgo = (iso) => {
@@ -334,6 +335,7 @@
     } else {
       $('driverNote').classList.remove('hidden');
       $('trackBtn').classList.remove('hidden');
+      $('followBtn').classList.remove('hidden');
       $('listTitle').textContent = TRUCKS[myTruck].name + ' — roads';
       map.setView([STARTS[myTruck].lat, STARTS[myTruck].lon], 14);
     }
@@ -344,12 +346,27 @@
     if (!r.ok) alert('Reset failed — admin PIN required.');
   });
 
-  // ---------- GPS tracking (driver only) ----------
+  // Follow mode (driver view): while on, every GPS fix pans the map so
+  // the truck stays centred — no manual zooming/panning while driving.
+  // Dragging the map turns follow off, so a manual look around is never
+  // fought; tapping "Follow my truck" turns it back on.
+  function setFollow(on) {
+    followMe = on;
+    const btn = $('followBtn');
+    if (btn) btn.textContent = on ? '◉ Following — tap to pause' : '◎ Follow my truck';
+    if (on && lastPos) {
+      if (map.getZoom() < 16) map.setZoom(16);
+      map.panTo([lastPos.coords.latitude, lastPos.coords.longitude], { animate: true });
+    }
+  }
+  $('followBtn').addEventListener('click', () => setFollow(!followMe));
+  map.on('dragstart', () => { if (followMe) setFollow(false); });
   function sendPosition(pos) {
     const now = Date.now();
     if (now - lastSent < 3000) return;
     lastSent = now;
     lastPos = pos;
+    if (followMe) map.panTo([pos.coords.latitude, pos.coords.longitude], { animate: true });
     fetch('/api/position', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ truck: myTruck, pin, lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy || null, driverName: driverName(), clientTs: now }) })
       .catch(() => {});
@@ -365,12 +382,14 @@
     tracking = true;
     $('trackBtn').classList.add('hidden');
     $('stopBtn').classList.remove('hidden');
+    setFollow(true); // follow on by default when tracking starts; drag the map to pause it
     watchId = navigator.geolocation.watchPosition(sendPosition, (err) => { $('gpsStatus').textContent = 'GPS error: ' + err.message; }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
     // Also send a heartbeat even if the position hasn't moved, so the pin stays live.
     setInterval(() => { if (tracking && lastPos) sendPosition(lastPos); }, 5000);
   });
   $('stopBtn').addEventListener('click', () => {
     tracking = false;
+    setFollow(false);
     if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     $('stopBtn').classList.add('hidden');
     $('trackBtn').classList.remove('hidden');
