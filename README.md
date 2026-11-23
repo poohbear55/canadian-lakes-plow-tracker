@@ -25,9 +25,17 @@ no public link. This app has its own small server, so it can do both.
   it has actually passed turn green on the map, section by section — so
   turning off mid-road leaves only the driven part green. A road still
   counts DONE (and turns fully green) only once the truck's GPS has come
-  within 45 m of **both** ends of the road. Loop roads need the start plus
+  within 45 m of **both** ends of the road **and** covered at least 80%
+  of its ~20 m sections. Both ends alone is not enough — a road's ends
+  sit on other roads, so driving those can hit both ends without ever
+  driving the road itself (Deerfield Road was falsely marked done at
+  38% covered on 2026-11-23). Loop roads need the start plus
   the far side of the loop. Drivers can also tap a road to mark it done
   by hand.
+- **Follow mode:** on a driver link, tapping Start GPS tracking also
+  turns on follow — the map pans to keep the truck centred, so no
+  manual zooming/panning while driving. Dragging the map pauses
+  follow; the "Follow my truck" button turns it back on.
 - **Breadcrumb trail:** every GPS fix also leaves a black dotted trail,
   on a route road or not — so if a driver takes an extra
   road that isn't on the map, the trail still shows exactly where they
