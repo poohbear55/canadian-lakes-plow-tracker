@@ -20,9 +20,12 @@ no public link. This app has its own small server, so it can do both.
   pushes positions and completions to every open admin/driver screen over
   Server-Sent Events. Truck pins glide between updates; road colours
   change in place.
-- **End-to-end completion, same as the Muse tracker:** a road turns green
-  only once the truck's GPS has come within 45 m of **both** ends of the
-  road. One end reached = amber / STARTED. Loop roads need the start plus
+- **Progressive green + end-to-end completion, same as the Muse tracker:**
+  each road is split into ~20 m sections. As the truck drives, the sections
+  it has actually passed turn green on the map, section by section — so
+  turning off mid-road leaves only the driven part green. A road still
+  counts DONE (and turns fully green) only once the truck's GPS has come
+  within 45 m of **both** ends of the road. Loop roads need the start plus
   the far side of the loop. Drivers can also tap a road to mark it done
   by hand.
 - **Drive it your way:** drivers do roads in any order; the list order is
