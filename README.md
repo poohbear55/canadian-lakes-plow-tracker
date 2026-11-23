@@ -32,6 +32,10 @@ no public link. This app has its own small server, so it can do both.
   38% covered on 2026-11-23). Loop roads need the start plus
   the far side of the loop. Drivers can also tap a road to mark it done
   by hand.
+- **Any truck can do anybody's road:** if a driver ends up on another
+  truck's route and actually drives that road — both ends and at least
+  80% of it — it turns green for everyone (admin, the road's own truck,
+  and the helper). Just passing its ends does not count it done.
 - **Follow mode:** on a driver link, tapping Start GPS tracking also
   turns on follow — the map pans to keep the truck centred, so no
   manual zooming/panning while driving. Dragging the map pauses
