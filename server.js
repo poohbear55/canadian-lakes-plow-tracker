@@ -17,11 +17,17 @@
 //     falsely marked Deerfield Road done at only 38% covered on
 //     2026-11-23. The 80% coverage rule stops that: the middle has to
 //     be driven too.
+//   * ANY truck can complete ANY road (2026-11-23, per Grayson): if a
+//     driver ends up on another truck's route and actually drives that
+//     road, it turns green for them too. The same accuracy rule applies
+//     no matter who drives it — both ends AND at least 80% covered —
+//     so just passing its ends on other roads does not count it done.
 //   * PROGRESSIVE GREEN: each road is split into ~20 m sub-segments. As the
 //     truck drives, every sub-segment within 45 m of its GPS position turns
 //     green on the map, section by section. Turning off mid-road leaves only
 //     the driven sections green — the rest stays the truck colour and the
-//     road does NOT count as done until both ends have been reached.
+//     road does NOT count as done until both ends have been reached
+//     and 80% is covered.
 //   * Breadcrumb trail: every GPS fix also appends to that truck's trail
 //     for the current run (only when it has moved >10 m, capped at 2,000
 //     points). The trail is drawn on the map as a black dotted line,
@@ -253,16 +259,21 @@ function publicState() {
     history: state.history,
   };
 }
-// A truck PIN sees only its own truck's position/progress/done/feed.
+// A truck PIN sees only its own truck's position/trail/feed, and its
+// road list/counts stay its own truck — but doneRoadIds are NOT
+// filtered: a road another truck helped finish still shows green on
+// every map (admin, the road's own truck, and the helper's phone).
+// doneCount stays scoped to the viewer's own truck, so e.g. Orange
+// still reads x/56 even if it helped finish a Red road.
 function filterState(s, scope) {
   if (scope === 'admin') return s;
   const myRoads = new Set(ROUTES.filter((r) => r.truck === scope).map((r) => r.id));
   return {
     ...s,
-    doneRoadIds: s.doneRoadIds.filter((id) => myRoads.has(id)),
+    doneRoadIds: s.doneRoadIds,
     doneCount: s.doneRoadIds.filter((id) => myRoads.has(id)).length,
     totalRoads: myRoads.size,
-    progress: s.progress.filter((p) => myRoads.has(p.roadId)),
+    progress: s.progress.filter((p) => myRoads.has(p.roadId) || s.doneRoadIds.includes(p.roadId)),
     positions: s.positions.filter((p) => p.truck === scope),
     trails: (s.trails || []).filter((t) => t.truck === scope),
     feed: s.feed.filter((f) => !f.truck || f.truck === scope),
@@ -319,7 +330,10 @@ function handlePosition(body) {
   }
   const newlyCompleted = [];
   const inProgress = [];
-  for (const road of ROUTES.filter((r) => r.truck === truck)) {
+  // Any truck can complete any road: check ALL routes, not just this
+  // truck's own — a driver helping on another route still counts,
+  // under the same both-ends + 80% accuracy rule.
+  for (const road of ROUTES) {
     if (state.done[road.id]) continue;
     const ends = roadEnds(road);
     const prev = state.progress[road.id] || { roadId: road.id, endA: false, endB: false, covered: [] };
