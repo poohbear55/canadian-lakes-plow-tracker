@@ -5,6 +5,11 @@
 // into ~20 m sub-segments and reports which are covered; the base line
 // stays the truck colour and covered sections draw green on top, so a
 // road only counts DONE (fully green) once both ends have been reached.
+// Breadcrumb trail: state.trails carries each visible truck's path for
+// this run; it draws as a black dotted line, on-road or off, so an extra
+// road that isn't on the map still shows where the truck actually went.
+// (Black, not the truck colour, so it stands out against the red/orange/
+// purple roads and the green covered sections.)
 // Driver links (?driver=1&truck=N) lock the phone to that truck only: no
 // admin view, no truck switcher, ever.
 (function () {
@@ -46,6 +51,7 @@
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
   }).addTo(map);
   const roadLayers = new Map(); // roadId -> {layer, overlay, road}
+  const trailLayers = {}; // truck -> L.polyline (breadcrumb trail)
   const pinLayers = {}; // truck -> {marker, from, to, startTs}
   const labelLayer = L.layerGroup().addTo(map);
 
@@ -106,6 +112,33 @@
         else { flush(); run = [cur]; }
       }
       flush();
+    }
+  }
+  // Breadcrumb trails: one black dotted polyline per visible truck,
+  // grown live from state.trails on every SSE push.
+  // Dotted + thinner than the solid road lines, so it reads as "where
+  // the truck actually drove" even where it overlaps a road — and it
+  // keeps drawing where there is no road at all. A driver sees only
+  // their own truck's trail (the server scopes state.trails by PIN);
+  // admin sees all three. An empty trail (new run / reset) removes
+  // the line.
+  function refreshTrails() {
+    const visible = pinScope === 'admin' ? [1, 2, 3] : [myTruck || pinScope];
+    for (const t of [1, 2, 3]) {
+      const entry = (state.trails || []).find((x) => x.truck === t);
+      const pts = entry ? entry.points || [] : [];
+      const show = visible.includes(t) && pts.length >= 2;
+      if (!show) {
+        if (trailLayers[t]) { map.removeLayer(trailLayers[t]); delete trailLayers[t]; }
+        continue;
+      }
+      const latlngs = pts.map((p) => [p.lat, p.lon]);
+      if (trailLayers[t]) trailLayers[t].setLatLngs(latlngs);
+      else {
+        trailLayers[t] = L.polyline(latlngs, {
+          color: '#000000', weight: 4, opacity: 0.9, dashArray: '1 6', lineCap: 'round',
+        }).addTo(map);
+      }
     }
   }
   function roadPopup(road) {
@@ -196,6 +229,7 @@
     $('doneCount').textContent = state.doneCount || 0;
     $('totalCount').textContent = total;
     refreshRoadColors();
+    refreshTrails();
     // pins
     for (const p of state.positions || []) glidePin(p.truck, p.lat, p.lon);
     // truck cards
