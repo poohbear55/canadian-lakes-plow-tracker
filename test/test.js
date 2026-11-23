@@ -102,6 +102,58 @@ async function main() {
   assert.equal(st.json.doneCount, 0, 'two sections still must not complete the road');
   console.log('ok: progressive green — mid-road position covers only driven sections, road not done');
 
+  // 4c. Breadcrumb trail: a moving truck leaves a trail in order, on-road
+  //     or off; a parked truck does not spam points; trails are scoped
+  //     by PIN and cleared on reset.
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  const trailPts = [[43.5900, -85.3100], [43.5902, -85.3100], [43.5904, -85.3100], [43.5906, -85.3100]]; // ~22 m apart
+  for (const [lat, lon] of trailPts) {
+    r = await post('/api/position', { truck: 1, pin: '1101', lat, lon, driverName: 'Test' });
+    assert.equal(r.status, 200);
+  }
+  st = await j('/api/state?pin=9999');
+  let trails = st.json.trails || [];
+  let t1 = trails.find((t) => t.truck === 1);
+  assert.ok(t1, 'admin sees Truck 1 trail');
+  assert.equal(t1.points.length, trailPts.length, 'one trail point per move');
+  assert.deepEqual(t1.points.map((p) => [p.lat, p.lon]), trailPts, 'trail points in driving order');
+  // Stationary repeat (same spot) and a tiny <10 m shuffle add nothing.
+  await post('/api/position', { truck: 1, pin: '1101', lat: 43.5906, lon: -85.3100, driverName: 'Test' });
+  await post('/api/position', { truck: 1, pin: '1101', lat: 43.59065, lon: -85.3100, driverName: 'Test' });
+  st = await j('/api/state?pin=9999');
+  t1 = (st.json.trails || []).find((t) => t.truck === 1);
+  assert.equal(t1.points.length, trailPts.length, 'parked truck does not spam trail points');
+  // Truck 2 drives elsewhere; each truck PIN sees only its own trail.
+  await post('/api/position', { truck: 2, pin: '2202', lat: 43.5800, lon: -85.3000, driverName: 'Test' });
+  await post('/api/position', { truck: 2, pin: '2202', lat: 43.5802, lon: -85.3000, driverName: 'Test' });
+  st = await j('/api/state?pin=1101');
+  trails = st.json.trails || [];
+  assert.equal(trails.length, 1, 'Truck 1 PIN sees one trail');
+  assert.equal(trails[0].truck, 1, 'Truck 1 PIN sees only its own trail');
+  st = await j('/api/state?pin=2202');
+  trails = st.json.trails || [];
+  assert.equal(trails.length, 1, 'Truck 2 PIN sees one trail');
+  assert.equal(trails[0].truck, 2, 'Truck 2 PIN sees only its own trail');
+  st = await j('/api/state?pin=9999');
+  assert.equal((st.json.trails || []).length, 2, 'admin sees both trails');
+  // Reset clears trails.
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  st = await j('/api/state?pin=9999');
+  assert.deepEqual(st.json.trails || [], [], 'reset clears trails');
+  console.log('ok: breadcrumb trail — ordered points, no parked spam, PIN-scoped, cleared on reset');
+
+  // 4d. Trail colour is black, green coverage is untouched: the dotted
+  //     trail polyline in app.js must be black, and the green overlay
+  //     colour (#2ca02c) must still be there.
+  r = await j('/app.js');
+  assert.equal(r.status, 200);
+  assert.ok(r.body.includes("color: '#000000'"), 'trail polyline is black');
+  assert.ok(r.body.includes("dashArray: '1 6'"), 'trail is still dotted');
+  assert.ok(r.body.includes("color: '#2ca02c'"), 'green covered-section colour unchanged');
+  console.log('ok: black dotted trail in app.js, green fill-in untouched');
+
   // 5. Truck isolation: Truck 2 driving at Montreal Lane's ends must NOT
   //    complete Truck 1's road (and must not need Truck 1's PIN).
   r = await post('/api/reset', { pin: '9999' });
