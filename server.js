@@ -14,6 +14,12 @@
 //     green on the map, section by section. Turning off mid-road leaves only
 //     the driven sections green — the rest stays the truck colour and the
 //     road does NOT count as done until both ends have been reached.
+//   * Breadcrumb trail: every GPS fix also appends to that truck's trail
+//     for the current run (only when it has moved >10 m, capped at 2,000
+//     points). The trail is drawn on the map as a black dotted line,
+//     whether or not the truck is on a route road — so
+//     an extra road that isn't on the map still shows exactly where the
+//     truck went. Trails follow the same PIN scoping as positions.
 //   * Loop roads (ends meet) need the start point plus the far side of the
 //     loop — the second "end" is the point farthest from the first.
 //   * Drivers may tap a road to mark it done by hand (manual override).
@@ -43,6 +49,8 @@ const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const GPS_MATCH_METERS = 45;
 const SEGMENT_METERS = 20; // sub-segment length for progressive green coverage
+const TRAIL_MIN_METERS = 10; // only add a trail point after moving this far
+const TRAIL_MAX_POINTS = 2000; // per truck, per run; oldest points drop off
 
 const PINS = {
   1: process.env.TRUCK1_PIN || '1101',
@@ -174,6 +182,7 @@ function freshState() {
   return {
     run: { id: 1, label: 'Plow run — ' + new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }), startedAt: new Date().toISOString(), active: true },
     positions: {},        // truck -> {truck, lat, lon, accuracy, driverName, receivedAt, clientTs}
+    trails: {},           // truck -> [{lat, lon, at}] — breadcrumb trail for this run
     progress: {},         // roadId -> {roadId, endA: bool, endB: bool, covered: [segment indices]}
     done: {},             // roadId -> {roadId, doneAt, source: 'gps'|'manual', driverName}
     feed: [],             // newest first, capped
@@ -186,7 +195,11 @@ function loadState() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     if (fs.existsSync(STATE_FILE)) {
       const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (s && s.run && s.positions && s.done) state = s;
+      if (s && s.run && s.positions && s.done) {
+        state = s;
+        // State written before trails existed has no trails key.
+        if (!state.trails) state.trails = {};
+      }
     }
   } catch (e) { console.error('state load failed, starting fresh:', e.message); }
 }
@@ -226,6 +239,7 @@ function publicState() {
       };
     }),
     positions: Object.values(state.positions),
+    trails: Object.entries(state.trails || {}).map(([truck, points]) => ({ truck: Number(truck), points: points || [] })),
     feed: state.feed.slice(0, 50),
     history: state.history,
   };
@@ -241,6 +255,7 @@ function filterState(s, scope) {
     totalRoads: myRoads.size,
     progress: s.progress.filter((p) => myRoads.has(p.roadId)),
     positions: s.positions.filter((p) => p.truck === scope),
+    trails: (s.trails || []).filter((t) => t.truck === scope),
     feed: s.feed.filter((f) => !f.truck || f.truck === scope),
   };
 }
@@ -280,7 +295,19 @@ function handlePosition(body) {
     return { error: 'bad lat/lon', code: 400 };
   }
   const driverName = String(body.driverName || '').slice(0, 60);
-  state.positions[truck] = { truck, lat, lon, accuracy: body.accuracy ?? null, driverName, receivedAt: new Date().toISOString(), clientTs: body.clientTs ?? null };
+  const receivedAt = new Date().toISOString();
+  state.positions[truck] = { truck, lat, lon, accuracy: body.accuracy ?? null, driverName, receivedAt, clientTs: body.clientTs ?? null };
+  // Breadcrumb trail: append only after a real move (>10 m), so a parked
+  // truck sending heartbeats doesn't pile up duplicate points. Capped
+  // at 2,000 points per truck; oldest points drop off. The trail is
+  // recorded for every fix, on-road or off — it is not tied to roads.
+  if (!state.trails) state.trails = {};
+  const trail = state.trails[truck] || (state.trails[truck] = []);
+  const lastTrail = trail[trail.length - 1];
+  if (!lastTrail || distMeters(lat, lon, [lastTrail.lat, lastTrail.lon]) > TRAIL_MIN_METERS) {
+    trail.push({ lat, lon, at: receivedAt });
+    while (trail.length > TRAIL_MAX_POINTS) trail.shift();
+  }
   const newlyCompleted = [];
   const inProgress = [];
   for (const road of ROUTES.filter((r) => r.truck === truck)) {
