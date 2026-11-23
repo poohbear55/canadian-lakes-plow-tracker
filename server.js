@@ -8,7 +8,12 @@
 //
 // Same rules as the Muse live tracker (v11 routes):
 //   * A road counts DONE only once the truck's GPS has come within 45 m of
-//     BOTH ends of that road. One end reached = STARTED (amber), never done.
+//     BOTH ends of that road. One end reached = STARTED, never done.
+//   * PROGRESSIVE GREEN: each road is split into ~20 m sub-segments. As the
+//     truck drives, every sub-segment within 45 m of its GPS position turns
+//     green on the map, section by section. Turning off mid-road leaves only
+//     the driven sections green — the rest stays the truck colour and the
+//     road does NOT count as done until both ends have been reached.
 //   * Loop roads (ends meet) need the start point plus the far side of the
 //     loop — the second "end" is the point farthest from the first.
 //   * Drivers may tap a road to mark it done by hand (manual override).
@@ -37,6 +42,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const GPS_MATCH_METERS = 45;
+const SEGMENT_METERS = 20; // sub-segment length for progressive green coverage
 
 const PINS = {
   1: process.env.TRUCK1_PIN || '1101',
@@ -112,12 +118,63 @@ function roadEnds(road) {
   return result;
 }
 
+// ---- progressive coverage: split each road into ~20 m sub-segments ----
+// Segments are sampled points along each polyline line, so a segment index
+// always maps to the same piece of road on server and frontend (the
+// frontend gets the segment geometry from /api/routes). Total across all
+// 165 roads is a few thousand segments — cheap to check per GPS fix.
+const segmentsCache = new Map();
+function roadSegments(road) {
+  if (segmentsCache.has(road.id)) return segmentsCache.get(road.id);
+  const segs = [];
+  for (let li = 0; li < (road.lines || []).length; li++) {
+    const line = road.lines[li];
+    if (!line || line.length < 2) continue;
+    const pts = [line[0]];
+    let acc = 0; // metres since the last sampled point, along this line
+    for (let i = 1; i < line.length; i++) {
+      let curFrom = line[i - 1];
+      const to = line[i];
+      let remaining = distMeters(curFrom[0], curFrom[1], to);
+      while (acc + remaining >= SEGMENT_METERS && remaining > 0) {
+        const need = SEGMENT_METERS - acc;
+        const t = need / remaining;
+        const p = [curFrom[0] + (to[0] - curFrom[0]) * t, curFrom[1] + (to[1] - curFrom[1]) * t];
+        pts.push(p);
+        curFrom = p;
+        remaining = distMeters(curFrom[0], curFrom[1], to);
+        acc = 0;
+      }
+      acc += remaining;
+    }
+    const lastPt = line[line.length - 1];
+    if (distMeters(pts[pts.length - 1][0], pts[pts.length - 1][1], lastPt) > 0.1) pts.push(lastPt);
+    for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i], b: pts[i + 1], line: li });
+  }
+  segmentsCache.set(road.id, segs);
+  return segs;
+}
+
+// Distance (m) from a GPS point to a line segment, in a local flat
+// projection centred on the segment start.
+function pointSegmentDistMeters(lat, lon, a, b) {
+  const latM = 111132;
+  const lonM = 111320 * Math.cos((lat * Math.PI) / 180);
+  const bx = (b[1] - a[1]) * lonM;
+  const by = (b[0] - a[0]) * latM;
+  const px = (lon - a[1]) * lonM;
+  const py = (lat - a[0]) * latM;
+  const len2 = bx * bx + by * by;
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (px * bx + py * by) / len2));
+  return Math.hypot(px - bx * t, py - by * t);
+}
+
 // ---- state ----
 function freshState() {
   return {
     run: { id: 1, label: 'Plow run — ' + new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }), startedAt: new Date().toISOString(), active: true },
     positions: {},        // truck -> {truck, lat, lon, accuracy, driverName, receivedAt, clientTs}
-    progress: {},         // roadId -> {roadId, endA: bool, endB: bool}
+    progress: {},         // roadId -> {roadId, endA: bool, endB: bool, covered: [segment indices]}
     done: {},             // roadId -> {roadId, doneAt, source: 'gps'|'manual', driverName}
     feed: [],             // newest first, capped
     history: [],          // finished runs: {label, startedAt, endedAt, doneCount}
@@ -156,7 +213,18 @@ function publicState() {
     doneRoadIds: doneIds,
     doneCount: doneIds.length,
     totalRoads: ROUTES.length,
-    progress: Object.values(state.progress).map((p) => ({ roadId: p.roadId, endsHit: (p.endA ? 1 : 0) + (p.endB ? 1 : 0) })),
+    progress: Object.values(state.progress).map((p) => {
+      const total = roadSegments(ROAD_BY_ID.get(p.roadId)).length;
+      const covered = (p.covered || []).slice().sort((a, b) => a - b);
+      return {
+        roadId: p.roadId,
+        endsHit: (p.endA ? 1 : 0) + (p.endB ? 1 : 0),
+        covered,
+        coveredCount: covered.length,
+        totalSegments: total,
+        pct: total ? Math.round((covered.length / total) * 100) : 0,
+      };
+    }),
     positions: Object.values(state.positions),
     feed: state.feed.slice(0, 50),
     history: state.history,
@@ -218,20 +286,32 @@ function handlePosition(body) {
   for (const road of ROUTES.filter((r) => r.truck === truck)) {
     if (state.done[road.id]) continue;
     const ends = roadEnds(road);
-    const prev = state.progress[road.id] || { roadId: road.id, endA: false, endB: false };
+    const prev = state.progress[road.id] || { roadId: road.id, endA: false, endB: false, covered: [] };
     const hitA = prev.endA || distMeters(lat, lon, ends.endA) <= GPS_MATCH_METERS;
     const hitB = prev.endB || distMeters(lat, lon, ends.endB) <= GPS_MATCH_METERS;
-    if (!hitA && !hitB) continue;
-    if (hitA !== prev.endA || hitB !== prev.endB) {
-      state.progress[road.id] = { roadId: road.id, endA: hitA, endB: hitB };
-      if (hitA && hitB) {
-        state.done[road.id] = { roadId: road.id, doneAt: new Date().toISOString(), source: 'gps', driverName };
-        newlyCompleted.push({ id: road.id, name: road.name });
-        pushFeed({ type: 'done', truck, roadId: road.id, name: road.name, source: 'gps', driverName });
-      } else {
-        inProgress.push({ id: road.id, name: road.name, endsHit: (hitA ? 1 : 0) + (hitB ? 1 : 0) });
-        pushFeed({ type: 'started', truck, roadId: road.id, name: road.name, endsHit: (hitA ? 1 : 0) + (hitB ? 1 : 0), driverName });
+    // Progressive coverage: mark every ~20 m sub-segment within 45 m of
+    // this fix as covered. Coverage alone never completes a road — only
+    // both ends (below) does that.
+    const segs = roadSegments(road);
+    const coveredSet = new Set(prev.covered || []);
+    let coveredChanged = false;
+    for (let i = 0; i < segs.length; i++) {
+      if (coveredSet.has(i)) continue;
+      if (pointSegmentDistMeters(lat, lon, segs[i].a, segs[i].b) <= GPS_MATCH_METERS) {
+        coveredSet.add(i);
+        coveredChanged = true;
       }
+    }
+    const endsChanged = hitA !== prev.endA || hitB !== prev.endB;
+    if (!coveredChanged && !endsChanged) continue;
+    state.progress[road.id] = { roadId: road.id, endA: hitA, endB: hitB, covered: [...coveredSet].sort((a, b) => a - b) };
+    if (hitA && hitB && !(prev.endA && prev.endB)) {
+      state.done[road.id] = { roadId: road.id, doneAt: new Date().toISOString(), source: 'gps', driverName };
+      newlyCompleted.push({ id: road.id, name: road.name });
+      pushFeed({ type: 'done', truck, roadId: road.id, name: road.name, source: 'gps', driverName });
+    } else if (endsChanged) {
+      inProgress.push({ id: road.id, name: road.name, endsHit: (hitA ? 1 : 0) + (hitB ? 1 : 0) });
+      pushFeed({ type: 'started', truck, roadId: road.id, name: road.name, endsHit: (hitA ? 1 : 0) + (hitB ? 1 : 0), driverName });
     }
   }
   saveState();
@@ -247,6 +327,9 @@ function handleComplete(body) {
   const driverName = String(body.driverName || '').slice(0, 60);
   if (body.done) {
     state.done[road.id] = { roadId: road.id, doneAt: new Date().toISOString(), source: 'manual', driverName };
+    // Manual complete = whole road done: all sub-segments green.
+    const total = roadSegments(road).length;
+    state.progress[road.id] = { roadId: road.id, endA: true, endB: true, covered: Array.from({ length: total }, (_, i) => i) };
     pushFeed({ type: 'done', truck: road.truck, roadId: road.id, name: road.name, source: 'manual', driverName });
   } else {
     delete state.done[road.id];
@@ -275,7 +358,7 @@ const server = http.createServer(async (req, res) => {
           start: STARTS[t],
         })),
         landmarks: LANDMARKS,
-        routes: ROUTES,
+        routes: ROUTES.map((r) => ({ ...r, segments: roadSegments(r) })),
       });
     }
     if (p === '/api/state') {
@@ -339,4 +422,4 @@ if (require.main === module) {
     console.log('Set TRUCK1_PIN/TRUCK2_PIN/TRUCK3_PIN/ADMIN_PIN env vars to change the default PINs.');
   });
 }
-module.exports = { server, handlePosition, handleComplete, roadEnds, ROUTES, scopeForPin, publicState, filterState };
+module.exports = { server, handlePosition, handleComplete, roadEnds, roadSegments, pointSegmentDistMeters, ROUTES, scopeForPin, publicState, filterState };
