@@ -53,7 +53,11 @@ async function main() {
   console.log('ok: PINs enforced (401 without/wrong PIN)');
 
   // 4. End-to-end rule on Montreal Lane (Truck 1, order 1, id 1001):
-  //    one end -> STARTED, not done; other end -> DONE.
+  //    one end -> STARTED, not done; both ends + driving the middle
+  //    (>=80% covered) -> DONE. Ends alone are not enough — the middle
+  //    segment is more than 45 m from either end, so a truck that only
+  //    touched both ends (e.g. from intersecting roads) must not
+  //    complete it.
   const routes = (await j('/api/routes')).json.routes;
   const road = routes.find((x) => x.id === 1001);
   assert.ok(Array.isArray(road.segments) && road.segments.length >= 3, 'routes carry ~20 m segments for progressive green');
@@ -69,7 +73,13 @@ async function main() {
   assert.ok(prog && prog.coveredCount > 0, 'one end covers some segments (green overlay)');
   assert.ok(prog.pct > 0 && prog.pct < 100, 'one end is partial coverage, not 100%');
   r = await post('/api/position', { truck: 1, pin: '1101', lat: ends.endB[0], lon: ends.endB[1], driverName: 'Test' });
-  assert.equal(r.json.newlyCompleted.length, 1, 'both ends = completed');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.newlyCompleted, [], 'both ends without the middle must not complete');
+  st = await j('/api/state?pin=9999');
+  assert.equal(st.json.doneCount, 0, 'still 0 done after both ends only');
+  const midSeg = road.segments[Math.floor(road.segments.length / 2)];
+  r = await post('/api/position', { truck: 1, pin: '1101', lat: (midSeg.a[0] + midSeg.b[0]) / 2, lon: (midSeg.a[1] + midSeg.b[1]) / 2, driverName: 'Test' });
+  assert.equal(r.json.newlyCompleted.length, 1, 'both ends + middle driven = completed');
   assert.equal(r.json.newlyCompleted[0].id, 1001);
   st = await j('/api/state?pin=9999');
   assert.equal(st.json.doneCount, 1);
@@ -101,6 +111,33 @@ async function main() {
   assert.ok(prog.coveredCount >= firstCovered, 'second section adds (or keeps) coverage');
   assert.equal(st.json.doneCount, 0, 'two sections still must not complete the road');
   console.log('ok: progressive green — mid-road position covers only driven sections, road not done');
+
+  // 4b2. False-positive guard (Deerfield Road, 2026-11-23): its south
+  //      end is a point on Fawn Lake Drive and its north end is a point
+  //      on Main Street, so driving those two roads hits both ends
+  //      without ever driving Deerfield itself. Both ends alone must
+  //      NOT complete it; driving Deerfield end-to-end must.
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  const deer = routes.find((x) => x.id === 2047);
+  assert.ok(deer, 'Deerfield Road in routes');
+  const dEnds = roadEnds(deer);
+  r = await post('/api/position', { truck: 2, pin: '2202', lat: dEnds.endA[0], lon: dEnds.endA[1], driverName: 'Test' });
+  assert.equal(r.status, 200);
+  r = await post('/api/position', { truck: 2, pin: '2202', lat: dEnds.endB[0], lon: dEnds.endB[1], driverName: 'Test' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.newlyCompleted.filter((x) => x.id === 2047), [], 'both ends from other roads must not complete Deerfield');
+  st = await j('/api/state?pin=9999');
+  assert.ok(!st.json.doneRoadIds.includes(2047), 'Deerfield must NOT be done after both ends only');
+  prog = st.json.progress.find((p) => p.roadId === 2047);
+  assert.ok(prog && prog.pct < 80, 'Deerfield coverage after ends only is under 80% (' + (prog ? prog.pct : 0) + '%)');
+  // Now actually drive Deerfield, segment by segment.
+  for (const seg of deer.segments) {
+    await post('/api/position', { truck: 2, pin: '2202', lat: (seg.a[0] + seg.b[0]) / 2, lon: (seg.a[1] + seg.b[1]) / 2, driverName: 'Test' });
+  }
+  st = await j('/api/state?pin=9999');
+  assert.ok(st.json.doneRoadIds.includes(2047), 'driving Deerfield end-to-end must complete it');
+  console.log('ok: accuracy — Deerfield not done from intersecting roads, done once actually driven');
 
   // 4c. Breadcrumb trail: a moving truck leaves a trail in order, on-road
   //     or off; a parked truck does not spam points; trails are scoped
@@ -153,6 +190,14 @@ async function main() {
   assert.ok(r.body.includes("dashArray: '1 6'"), 'trail is still dotted');
   assert.ok(r.body.includes("color: '#2ca02c'"), 'green covered-section colour unchanged');
   console.log('ok: black dotted trail in app.js, green fill-in untouched');
+
+  // 4e. Follow mode: driver map pans to the truck, drag pauses it.
+  assert.ok(r.body.includes('followMe') && r.body.includes('panTo'), 'follow mode pans map to GPS fix');
+  assert.ok(r.body.includes("map.on('dragstart'"), 'dragging the map pauses follow');
+  assert.ok(r.body.includes('setFollow(true)'), 'follow turns on when tracking starts');
+  r = await j('/');
+  assert.ok(r.body.includes('followBtn') && r.body.includes('Follow my truck'), 'Follow button on the page');
+  console.log('ok: follow mode — map follows the truck, drag pauses it, button present');
 
   // 5. Truck isolation: Truck 2 driving at Montreal Lane's ends must NOT
   //    complete Truck 1's road (and must not need Truck 1's PIN).
