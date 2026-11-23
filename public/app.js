@@ -1,8 +1,12 @@
 // Canadian Lakes Public Plow Tracker — frontend.
 // One page, no framework. Live updates arrive over Server-Sent Events
 // (/api/events); the map is never reloaded — pins glide and road colours
-// change in place. Driver links (?driver=1&truck=N) lock the phone to
-// that truck only: no admin view, no truck switcher, ever.
+// change in place. Coverage is progressive: the server splits each road
+// into ~20 m sub-segments and reports which are covered; the base line
+// stays the truck colour and covered sections draw green on top, so a
+// road only counts DONE (fully green) once both ends have been reached.
+// Driver links (?driver=1&truck=N) lock the phone to that truck only: no
+// admin view, no truck switcher, ever.
 (function () {
   'use strict';
   const params = new URLSearchParams(location.search);
@@ -41,34 +45,75 @@
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
   }).addTo(map);
-  const roadLayers = new Map(); // roadId -> {layer, road}
+  const roadLayers = new Map(); // roadId -> {layer, overlay, road}
   const pinLayers = {}; // truck -> {marker, from, to, startTs}
   const labelLayer = L.layerGroup().addTo(map);
 
+  // Base colour: a road stays its truck colour until it is DONE, when the
+  // whole line is green. Partial progress is shown by the green overlay
+  // (refreshCoverage), never by recolouring the whole road amber.
   function roadColor(road) {
     if (state && state.doneRoadIds && state.doneRoadIds.includes(road.id)) return '#2ca02c';
-    const prog = state && state.progress ? state.progress.find((p) => p.roadId === road.id) : null;
-    if (prog && prog.endsHit > 0) return '#f5b301';
     return TRUCKS[road.truck].color;
+  }
+  function progressFor(road) {
+    const prog = state && state.progress ? state.progress.find((p) => p.roadId === road.id) : null;
+    if (!prog) return { covered: [], total: (road.segments || []).length, pct: 0 };
+    const total = prog.totalSegments || (road.segments || []).length;
+    const covered = prog.covered || [];
+    return { covered, total, pct: total ? Math.round((covered.length / total) * 100) : 0 };
   }
   function drawRoads() {
     for (const road of ROUTES) {
       if (roadLayers.has(road.id)) continue;
       const latlngs = road.lines.map((line) => line.map((p) => [p[0], p[1]]));
       const layer = L.polyline(latlngs, { color: roadColor(road), weight: 5, opacity: 0.9 }).addTo(map);
+      const overlay = L.layerGroup().addTo(map); // green covered sub-segments
       layer.bindPopup(() => roadPopup(road));
       layer.on('click', () => layer.openPopup());
-      roadLayers.set(road.id, { layer, road });
+      roadLayers.set(road.id, { layer, overlay, road });
     }
     refreshRoadColors();
   }
   function refreshRoadColors() {
     for (const { layer, road } of roadLayers.values()) layer.setStyle({ color: roadColor(road) });
+    refreshCoverage();
+  }
+  // Green overlay: draw the covered ~20 m sub-segments (from /api/routes),
+  // grouped into contiguous runs within one original polyline line, so a
+  // run never jumps across a gap between disconnected pieces of a road.
+  // A done road is fully green. Updated in place on every SSE state push.
+  function refreshCoverage() {
+    for (const { overlay, road } of roadLayers.values()) {
+      overlay.clearLayers();
+      const segs = road.segments || [];
+      if (!segs.length) continue;
+      const done = state && state.doneRoadIds && state.doneRoadIds.includes(road.id);
+      const covered = done ? segs.map((_, i) => i) : progressFor(road).covered.slice().sort((a, b) => a - b);
+      if (!covered.length) continue;
+      let run = [covered[0]];
+      const flush = () => {
+        if (!run.length) return;
+        const pts = [[segs[run[0]].a[0], segs[run[0]].a[1]]];
+        for (const idx of run) pts.push([segs[idx].b[0], segs[idx].b[1]]);
+        overlay.addLayer(L.polyline(pts, { color: '#2ca02c', weight: 6, opacity: 0.95 }));
+        run = [];
+      };
+      for (let i = 1; i < covered.length; i++) {
+        const prev = covered[i - 1];
+        const cur = covered[i];
+        if (cur === prev + 1 && segs[cur].line === segs[prev].line) run.push(cur);
+        else { flush(); run = [cur]; }
+      }
+      flush();
+    }
   }
   function roadPopup(road) {
     const done = state && state.doneRoadIds.includes(road.id);
-    const prog = state && state.progress ? state.progress.find((p) => p.roadId === road.id) : null;
-    const status = done ? 'DONE ✓' : prog && prog.endsHit > 0 ? 'STARTED — one end reached (' + prog.endsHit + '/2)' : 'Not started';
+    const prog = progressFor(road);
+    const status = done ? 'DONE ✓' : prog.covered.length > 0
+      ? 'STARTED — ~' + prog.pct + '% covered (' + prog.covered.length + '/' + prog.total + ' sections plowed)'
+      : 'Not started';
     const canMark = pinScope === 'admin' || pinScope === road.truck;
     const btn = canMark
       ? '<br><button data-road="' + road.id + '" data-done="' + (done ? '0' : '1') + '" class="markBtn">' + (done ? 'Mark NOT done' : 'Mark done') + '</button>'
@@ -179,11 +224,11 @@
       for (const road of roads) {
         const done = state.doneRoadIds.includes(road.id);
         if (!done && !suggested) suggested = road;
-        const prog = state.progress ? state.progress.find((p) => p.roadId === road.id) : null;
+        const prog = progressFor(road);
         const li = document.createElement('li');
-        li.className = done ? 'done' : (prog && prog.endsHit > 0 ? 'started' : '');
+        li.className = done ? 'done' : (prog.covered.length > 0 ? 'started' : '');
         li.innerHTML = '<label><input type="checkbox" data-road="' + road.id + '"' + (done ? ' checked' : '') + '> ' +
-          road.order + '. ' + road.name + ' — ' + road.miles + ' mi' + (prog && !done && prog.endsHit > 0 ? ' · STARTED' : '') + '</label>';
+          road.order + '. ' + road.name + ' — ' + road.miles + ' mi' + (prog.covered.length > 0 && !done ? ' · ~' + prog.pct + '% plowed' : '') + '</label>';
         list.appendChild(li);
       }
     }
