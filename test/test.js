@@ -56,6 +56,7 @@ async function main() {
   //    one end -> STARTED, not done; other end -> DONE.
   const routes = (await j('/api/routes')).json.routes;
   const road = routes.find((x) => x.id === 1001);
+  assert.ok(Array.isArray(road.segments) && road.segments.length >= 3, 'routes carry ~20 m segments for progressive green');
   const ends = roadEnds(road);
   r = await post('/api/position', { truck: 1, pin: '1101', lat: ends.endA[0], lon: ends.endA[1], driverName: 'Test' });
   assert.equal(r.status, 200);
@@ -63,13 +64,43 @@ async function main() {
   assert.equal(r.json.inProgress.length, 1, 'one end = in progress');
   let st = await j('/api/state?pin=9999');
   assert.equal(st.json.doneCount, 0, 'still 0 done after one end');
+  assert.ok(!st.json.doneRoadIds.includes(1001), 'one end must not mark road done');
+  let prog = st.json.progress.find((p) => p.roadId === 1001);
+  assert.ok(prog && prog.coveredCount > 0, 'one end covers some segments (green overlay)');
+  assert.ok(prog.pct > 0 && prog.pct < 100, 'one end is partial coverage, not 100%');
   r = await post('/api/position', { truck: 1, pin: '1101', lat: ends.endB[0], lon: ends.endB[1], driverName: 'Test' });
   assert.equal(r.json.newlyCompleted.length, 1, 'both ends = completed');
   assert.equal(r.json.newlyCompleted[0].id, 1001);
   st = await j('/api/state?pin=9999');
   assert.equal(st.json.doneCount, 1);
   assert.ok(st.json.doneRoadIds.includes(1001));
-  console.log('ok: end-to-end rule — Montreal Lane amber at one end, green at both');
+  console.log('ok: end-to-end rule — Montreal Lane partial green at one end, green at both');
+
+  // 4b. Progressive coverage mid-road: driving the middle of a road (never
+  //     reaching either end) turns only that section green and never
+  //     counts the road done.
+  r = await post('/api/reset', { pin: '9999' });
+  assert.equal(r.status, 200);
+  const mid = road.segments[Math.floor(road.segments.length / 2)];
+  const midLat = (mid.a[0] + mid.b[0]) / 2, midLon = (mid.a[1] + mid.b[1]) / 2;
+  r = await post('/api/position', { truck: 1, pin: '1101', lat: midLat, lon: midLon, driverName: 'Test' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.newlyCompleted, [], 'mid-road position must not complete');
+  st = await j('/api/state?pin=9999');
+  assert.equal(st.json.doneCount, 0, 'mid-road: still 0 done');
+  assert.ok(!st.json.doneRoadIds.includes(1001), 'mid-road: road must NOT be in doneRoadIds');
+  prog = st.json.progress.find((p) => p.roadId === 1001);
+  assert.ok(prog && prog.coveredCount > 0, 'mid-road: covered segments non-empty');
+  assert.ok(prog.pct > 0 && prog.pct < 100, 'mid-road: partial pct, not 100%');
+  const firstCovered = prog.coveredCount;
+  // Driving a different section adds coverage without completing the road.
+  const other = road.segments[0];
+  await post('/api/position', { truck: 1, pin: '1101', lat: (other.a[0] + other.b[0]) / 2, lon: (other.a[1] + other.b[1]) / 2, driverName: 'Test' });
+  st = await j('/api/state?pin=9999');
+  prog = st.json.progress.find((p) => p.roadId === 1001);
+  assert.ok(prog.coveredCount >= firstCovered, 'second section adds (or keeps) coverage');
+  assert.equal(st.json.doneCount, 0, 'two sections still must not complete the road');
+  console.log('ok: progressive green — mid-road position covers only driven sections, road not done');
 
   // 5. Truck isolation: Truck 2 driving at Montreal Lane's ends must NOT
   //    complete Truck 1's road (and must not need Truck 1's PIN).
@@ -114,10 +145,14 @@ async function main() {
   assert.equal(r.status, 200);
   st = await j('/api/state?pin=9999');
   assert.ok(st.json.doneRoadIds.includes(3001), 'manual complete works');
+  prog = st.json.progress.find((p) => p.roadId === 3001);
+  assert.ok(prog && prog.coveredCount === prog.totalSegments && prog.pct === 100, 'manual complete marks all segments green');
   r = await post('/api/complete', { roadId: 3001, pin: '3303', done: false });
   st = await j('/api/state?pin=9999');
   assert.ok(!st.json.doneRoadIds.includes(3001), 'manual undo works');
-  console.log('ok: manual mark done / undo');
+  prog = st.json.progress.find((p) => p.roadId === 3001);
+  assert.ok(!prog || prog.coveredCount === 0, 'manual undo clears covered segments');
+  console.log('ok: manual mark done / undo (all segments green, then cleared)');
 
   // 9. Admin reset clears the run.
   await post('/api/position', { truck: 1, pin: '1101', lat: ends.endA[0], lon: ends.endA[1] });
@@ -126,6 +161,7 @@ async function main() {
   assert.equal(r.status, 200);
   st = await j('/api/state?pin=9999');
   assert.equal(st.json.doneCount, 0, 'reset clears done roads');
+  assert.deepEqual(st.json.progress, [], 'reset clears covered segments too');
   console.log('ok: admin reset starts a fresh run');
 
   server.close();
