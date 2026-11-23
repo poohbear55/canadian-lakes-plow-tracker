@@ -8,7 +8,15 @@
 //
 // Same rules as the Muse live tracker (v11 routes):
 //   * A road counts DONE only once the truck's GPS has come within 45 m of
-//     BOTH ends of that road. One end reached = STARTED, never done.
+//     BOTH ends of that road AND covered at least 80% of its ~20 m
+//     sub-segments. One end reached = STARTED, never done. Both ends
+//     alone is NOT enough: a road's ends sit on other roads (e.g.
+//     Deerfield Road's south end is a point on Fawn Lake Drive and its
+//     north end is a point on Main Street), so driving those other roads
+//     can hit both ends without ever driving the road itself — that
+//     falsely marked Deerfield Road done at only 38% covered on
+//     2026-11-23. The 80% coverage rule stops that: the middle has to
+//     be driven too.
 //   * PROGRESSIVE GREEN: each road is split into ~20 m sub-segments. As the
 //     truck drives, every sub-segment within 45 m of its GPS position turns
 //     green on the map, section by section. Turning off mid-road leaves only
@@ -48,6 +56,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const GPS_MATCH_METERS = 45;
+const COMPLETION_COVERAGE_PCT = 80; // a road also needs >=80% of its ~20 m sections covered before it counts DONE — both ends alone is not enough (see below)
 const SEGMENT_METERS = 20; // sub-segment length for progressive green coverage
 const TRAIL_MIN_METERS = 10; // only add a trail point after moving this far
 const TRAIL_MAX_POINTS = 2000; // per truck, per run; oldest points drop off
@@ -317,8 +326,8 @@ function handlePosition(body) {
     const hitA = prev.endA || distMeters(lat, lon, ends.endA) <= GPS_MATCH_METERS;
     const hitB = prev.endB || distMeters(lat, lon, ends.endB) <= GPS_MATCH_METERS;
     // Progressive coverage: mark every ~20 m sub-segment within 45 m of
-    // this fix as covered. Coverage alone never completes a road — only
-    // both ends (below) does that.
+    // this fix as covered. Coverage plus both ends (below) completes a
+    // road — neither alone does.
     const segs = roadSegments(road);
     const coveredSet = new Set(prev.covered || []);
     let coveredChanged = false;
@@ -332,7 +341,11 @@ function handlePosition(body) {
     const endsChanged = hitA !== prev.endA || hitB !== prev.endB;
     if (!coveredChanged && !endsChanged) continue;
     state.progress[road.id] = { roadId: road.id, endA: hitA, endB: hitB, covered: [...coveredSet].sort((a, b) => a - b) };
-    if (hitA && hitB && !(prev.endA && prev.endB)) {
+    // DONE needs both ends AND >=80% of the road's sections covered.
+    // (Ends alone can be hit from intersecting roads — Deerfield Road,
+    // 2026-11-23 — so coverage is what proves the road itself was driven.)
+    const coveredPct = segs.length ? Math.round((coveredSet.size / segs.length) * 100) : 0;
+    if (hitA && hitB && coveredPct >= COMPLETION_COVERAGE_PCT) {
       state.done[road.id] = { roadId: road.id, doneAt: new Date().toISOString(), source: 'gps', driverName };
       newlyCompleted.push({ id: road.id, name: road.name });
       pushFeed({ type: 'done', truck, roadId: road.id, name: road.name, source: 'gps', driverName });
