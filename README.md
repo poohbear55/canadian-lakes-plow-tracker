@@ -28,6 +28,12 @@ no public link. This app has its own small server, so it can do both.
   within 45 m of **both** ends of the road. Loop roads need the start plus
   the far side of the loop. Drivers can also tap a road to mark it done
   by hand.
+- **Breadcrumb trail:** every GPS fix also leaves a black dotted trail,
+  on a route road or not — so if a driver takes an extra
+  road that isn't on the map, the trail still shows exactly where they
+  went. A parked truck doesn't pile up points (only moves over 10 m
+  are added, capped at 2,000 points per truck per run). Admin sees all
+  three trails; a driver sees only their own.
 - **Drive it your way:** drivers do roads in any order; the list order is
   only a suggestion.
 - **Driver-only links:** `?driver=1&truck=1` (Red), `?driver=1&truck=2`
