@@ -199,15 +199,29 @@ async function main() {
   assert.ok(r.body.includes('followBtn') && r.body.includes('Follow my truck'), 'Follow button on the page');
   console.log('ok: follow mode — map follows the truck, drag pauses it, button present');
 
-  // 5. Truck isolation: Truck 2 driving at Montreal Lane's ends must NOT
-  //    complete Truck 1's road (and must not need Truck 1's PIN).
+  // 5. Cross-truck help (2026-11-23, per Grayson): any truck can do
+  //    anybody's road. Truck 2 at Montreal Lane's ends only must NOT
+  //    complete Truck 1's road (accuracy rule — ends alone, under 80%);
+  //    Truck 2 actually driving Montreal Lane end-to-end MUST complete
+  //    it, and it must show green to admin and to Truck 1 too.
   r = await post('/api/reset', { pin: '9999' });
   assert.equal(r.status, 200);
   await post('/api/position', { truck: 2, pin: '2202', lat: ends.endA[0], lon: ends.endA[1] });
   await post('/api/position', { truck: 2, pin: '2202', lat: ends.endB[0], lon: ends.endB[1] });
   st = await j('/api/state?pin=9999');
-  assert.ok(!st.json.doneRoadIds.includes(1001), 'Truck 2 must not complete Truck 1 road');
-  console.log('ok: truck isolation — Orange at Red road ends does not complete it');
+  assert.ok(!st.json.doneRoadIds.includes(1001), 'Truck 2 at Red road ends only must not complete it');
+  for (const seg of road.segments) {
+    await post('/api/position', { truck: 2, pin: '2202', lat: (seg.a[0] + seg.b[0]) / 2, lon: (seg.a[1] + seg.b[1]) / 2, driverName: 'Test' });
+  }
+  st = await j('/api/state?pin=9999');
+  assert.ok(st.json.doneRoadIds.includes(1001), 'Truck 2 driving Montreal Lane end-to-end must complete it');
+  st = await j('/api/state?pin=1101');
+  assert.ok(st.json.doneRoadIds.includes(1001), 'Truck 1 sees the road its helper finished as done');
+  assert.equal(st.json.doneCount, 1, 'Truck 1 done count counts its own road');
+  st = await j('/api/state?pin=2202');
+  assert.ok(st.json.doneRoadIds.includes(1001), 'helper truck also sees the helped road green');
+  assert.equal(st.json.doneCount, 0, 'helper done count still counts only its own truck roads');
+  console.log('ok: cross-truck help — Orange driving Montreal Lane end-to-end completes it, ends only do not');
 
   // 6. Truck PIN sees only its own truck; admin sees all.
   st = await j('/api/state?pin=2202');
